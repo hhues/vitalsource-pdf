@@ -18,11 +18,11 @@
         modal: null,
     };
 
-    // Message handling
+    // Message handling — accept messages from any origin since iframes
+    // may be hosted on CDN domains outside vitalsource.com
     window.addEventListener('message', (event) => {
-        if (!(event.origin || '').includes('vitalsource.com')) return;
-
         const { type, requestId, success, data, error, hasImage, url } = event.data || {};
+        if (!type || !type.startsWith('VS_')) return;
 
         if (type === 'VS_PAGE_CAPTURED' && requestId && state.pendingCaptures[requestId]) {
             const { resolve, reject } = state.pendingCaptures[requestId];
@@ -31,8 +31,9 @@
         }
 
         if (type === 'VS_PONG' && requestId && state.pendingCaptures[requestId] && hasImage) {
+            const { resolve } = state.pendingCaptures[requestId];
             delete state.pendingCaptures[requestId];
-            state.pendingCaptures[requestId]?.resolve({ hasImage, url });
+            resolve({ hasImage, url });
         }
 
         if (type === 'VS_IFRAME_READY') {
@@ -78,6 +79,23 @@
         }
         document.querySelectorAll('iframe').forEach((iframe) => {
             try { iframe.contentWindow.postMessage(message, '*'); } catch {}
+        });
+
+        // Also check Shadow DOM (VitalSource uses <mosaic-book> with shadow root)
+        const mosaicBook = document.querySelector('mosaic-book');
+        if (mosaicBook?.shadowRoot) {
+            mosaicBook.shadowRoot.querySelectorAll('iframe').forEach((iframe) => {
+                try { iframe.contentWindow.postMessage(message, '*'); } catch {}
+            });
+        }
+
+        // Generically search all elements with shadow roots for nested iframes
+        document.querySelectorAll('*').forEach((el) => {
+            if (el.shadowRoot) {
+                el.shadowRoot.querySelectorAll('iframe').forEach((iframe) => {
+                    try { iframe.contentWindow.postMessage(message, '*'); } catch {}
+                });
+            }
         });
     }
 

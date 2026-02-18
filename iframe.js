@@ -8,8 +8,24 @@
 
     const currentUrl = window.location.href;
 
+    function findPageImage() {
+        // Primary selector used by VitalSource
+        const primary = document.querySelector('img#pbk-page');
+        if (primary) return primary;
+
+        // Fallback: look for large images that are likely book page renders
+        const images = document.querySelectorAll('img');
+        for (const img of images) {
+            if (img.naturalWidth > 400 && img.naturalHeight > 400) {
+                return img;
+            }
+        }
+
+        return null;
+    }
+
     function hasPageImage() {
-        return !!document.querySelector('img#pbk-page');
+        return !!findPageImage();
     }
 
     function sendToParent(message) {
@@ -54,14 +70,14 @@
         };
     }
 
+    // Accept messages from any origin since parent page and iframes
+    // may be on different domains (school subdomains, CDNs, etc.)
     window.addEventListener('message', async (event) => {
-        if (!(event.origin || '').includes('vitalsource.com')) return;
-
         const { type, requestId } = event.data || {};
-        if (!type || !requestId) return;
+        if (!type || !type.startsWith('VS_') || !requestId) return;
 
         if (type === 'VS_CAPTURE_PAGE') {
-            const pageImg = document.querySelector('img#pbk-page');
+            const pageImg = findPageImage();
             if (pageImg) {
                 try {
                     const imageData = await captureImage(pageImg);
