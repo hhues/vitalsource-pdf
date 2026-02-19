@@ -51,15 +51,9 @@
         return name.replace(/[^a-z0-9\s\-_]/gi, '').replace(/\s+/g, '_').substring(0, 50);
     }
 
-    function getCurrentPageInfo() {
+    function getCurrentPageLabel() {
         const pageInput = document.querySelector('input[id^="text-field-"]');
-        const current = parseInt(pageInput?.value, 10) || 1;
-
-        const totalText = document.querySelector('.sc-wkwDy, [class*="ebHWgB"]');
-        const match = totalText?.textContent.match(/\/\s*(\d+)/);
-        const total = match ? parseInt(match[1], 10) : null;
-
-        return { current, total };
+        return pageInput?.value?.trim() || '';
     }
 
     function getBookTitle() {
@@ -138,7 +132,7 @@
                     clearTimeout(timeout);
                     delete state.pendingCaptures[requestId];
                     data.timestamp = Date.now();
-                    data.pageNumber = getCurrentPageInfo().current;
+                    data.pageLabel = getCurrentPageLabel();
                     resolve(data);
                 },
                 reject: (err) => {
@@ -195,10 +189,10 @@
             pdf.addImage(pageData.data, 'JPEG', dims.offsetX, dims.offsetY, dims.drawWidth, dims.drawHeight);
 
             const filename = sanitizeFilename(getBookTitle() || 'vitalsource');
-            const pageNum = pageData.pageNumber || getCurrentPageInfo().current;
-            pdf.save(`${filename}_page${pageNum}.pdf`);
+            const pageLabel = pageData.pageLabel || getCurrentPageLabel() || '1';
+            pdf.save(`${filename}_page${pageLabel}.pdf`);
 
-            console.log('[VS-PDF] Downloaded page', pageNum);
+            console.log('[VS-PDF] Downloaded page', pageLabel);
         } catch (e) {
             console.error('[VS-PDF] Download failed:', e);
             alert('Download failed: ' + e.message);
@@ -231,9 +225,9 @@
             let filename = document.getElementById('vs-filename').value.trim();
             if (!filename) filename = sanitizeFilename(getBookTitle() || 'vitalsource-book');
 
-            const firstPage = state.capturedPages[0].pageNumber || 1;
-            const lastPage = state.capturedPages[state.capturedPages.length - 1].pageNumber || state.capturedPages.length;
-            pdf.save(`${filename}_p${firstPage}-${lastPage}.pdf`);
+            const firstLabel = state.capturedPages[0].pageLabel || '1';
+            const lastLabel = state.capturedPages[state.capturedPages.length - 1].pageLabel || String(state.capturedPages.length);
+            pdf.save(`${filename}_p${firstLabel}-${lastLabel}.pdf`);
 
             updateStatus(`<strong>Download started!</strong><br>${state.capturedPages.length} pages saved.`, 'success');
         } catch (e) {
@@ -251,7 +245,6 @@
         updateModalUI();
 
         const pageLimit = parseInt(document.getElementById('vs-page-limit').value, 10) || 10;
-        let pageNum = getCurrentPageInfo().current;
 
         updateStatus('Checking connection...');
 
@@ -264,7 +257,7 @@
             return;
         }
 
-        updateStatus(`Starting from page ${pageNum}...`);
+        updateStatus('Starting capture...');
 
         let captured = 0;
         while (state.isRunning && captured < pageLimit) {
@@ -274,8 +267,9 @@
                 state.capturedPages.push(pageData);
                 captured++;
 
+                const label = pageData.pageLabel || `#${captured}`;
                 updateModalUI();
-                updateStatus(`Captured page ${pageNum}. Total: ${state.capturedPages.length}`);
+                updateStatus(`Captured page ${label} (${captured}/${pageLimit})`);
                 updateProgress(captured, pageLimit);
 
                 if (captured >= pageLimit) {
@@ -284,14 +278,13 @@
                 }
 
                 await goToNextPage();
-                pageNum++;
             } catch (e) {
                 if (e.message === 'Last page') {
                     updateStatus(`Done! ${state.capturedPages.length} pages captured.`, 'success');
                     break;
                 }
-                updateStatus(`Error on page ${pageNum}: ${e.message}`, 'error');
-                try { await goToNextPage(); pageNum++; } catch { break; }
+                updateStatus(`Error on page ${captured + 1}: ${e.message}`, 'error');
+                try { await goToNextPage(); } catch { break; }
             }
         }
 
@@ -389,7 +382,7 @@
 
     function showChoiceDialog() {
         createChoiceDialog();
-        document.getElementById('vs-current-page').textContent = getCurrentPageInfo().current;
+        document.getElementById('vs-current-page').textContent = getCurrentPageLabel() || '--';
         document.getElementById('vs-choice-dialog').classList.add('visible');
     }
 
@@ -449,7 +442,7 @@
                 <h2>Download PDF</h2>
                 <div class="page-count"><strong id="vs-page-count">0</strong> pages captured</div>
                 <div class="form-group">
-                    <label>Pages to capture (from current page)</label>
+                    <label>Number of pages to capture forward</label>
                     <input type="number" id="vs-page-limit" value="10" min="1" placeholder="Number of pages">
                 </div>
                 <div class="form-group">
