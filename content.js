@@ -11,11 +11,14 @@
     console.log('[VS-PDF] Content script loaded');
 
     const state = {
-        capturedPages: [],
         isRunning: false,
         readyFrames: [],
         pendingCaptures: {},
         modal: null,
+        pdf: null,
+        pageCount: 0,
+        firstPageLabel: null,
+        lastPageLabel: null,
     };
 
     // Message handling — accept messages from any origin since iframes
@@ -152,23 +155,24 @@
         const input = document.querySelector('input[id^="text-field-"]');
         if (!input) throw new Error('No page input found');
 
-        const current = parseInt(input.value, 10);
-        if (isNaN(current)) throw new Error('Cannot read current page');
+        const currentLabel = input.value.trim();
 
-        const next = current + 1;
+        // Click the next button
+        const nextBtn = document.querySelector('button[aria-label="Next"]');
+        if (!nextBtn) throw new Error('No Next button found');
+        if (nextBtn.disabled || nextBtn.getAttribute('aria-disabled') === 'true') {
+            return 'last-page';
+        }
 
-        // Use the native setter to bypass React's controlled input
-        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        nativeSetter.call(input, String(next));
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.closest('form').dispatchEvent(new Event('submit', { bubbles: true }));
-
+        nextBtn.click();
         await sleep(1500);
 
-        // Check if we actually moved — if not, we're at the last page
-        if (parseInt(input.value, 10) === current) {
-            throw new Error('Last page');
+        // Check if the page actually changed
+        const newLabel = input.value.trim();
+        if (newLabel === currentLabel) {
+            return 'last-page';
         }
+        return 'moved';
     }
 
     // PDF generation
@@ -213,42 +217,9 @@
     }
 
     async function generatePDF() {
-        if (state.capturedPages.length === 0) {
-            updateStatus('No pages captured!', 'error');
-            return;
-        }
-
-        updateStatus('Generating PDF...');
-        document.getElementById('vs-action').disabled = true;
-
-        try {
-            const { jsPDF } = window.jspdf;
-            const pdf = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'letter' });
-
-            state.capturedPages.forEach((page, i) => {
-                if (i > 0) pdf.addPage('letter', 'portrait');
-
-                const dims = calculateImageDimensions(page.width, page.height);
-                pdf.addImage(page.data, 'JPEG', dims.offsetX, dims.offsetY, dims.drawWidth, dims.drawHeight);
-
-                updateProgress(i + 1, state.capturedPages.length);
-                updateStatus(`Building PDF: ${i + 1}/${state.capturedPages.length}`);
-            });
-
-            let filename = document.getElementById('vs-filename').value.trim();
-            if (!filename) filename = sanitizeFilename(getBookTitle() || 'vitalsource-book');
-
-            const firstLabel = state.capturedPages[0].pageLabel || '1';
-            const lastLabel = state.capturedPages[state.capturedPages.length - 1].pageLabel || String(state.capturedPages.length);
-            pdf.save(`${filename}_p${firstLabel}-${lastLabel}.pdf`);
-
-            updateStatus(`<strong>Download started!</strong><br>${state.capturedPages.length} pages saved.`, 'success');
-        } catch (e) {
-            updateStatus(`PDF error: ${e.message}`, 'error');
-        } finally {
-            document.getElementById('vs-action').disabled = false;
-            updateModalUI();
-        }
+        // With chunked saving, all chunks are already saved automatically.
+        // If we reach here, just inform the user.
+        updateStatus(`All captured pages were already saved automatically.`, 'success');
     }
 
     // Capture workflow
@@ -258,6 +229,7 @@
         updateModalUI();
 
         const pageLimit = parseInt(document.getElementById('vs-page-limit').value, 10) || 10;
+        const CHUNK_SIZE = 50; // PDF chunk size to avoid Oh Snaps
 
         updateStatus('Checking connection...');
 
@@ -272,33 +244,111 @@
 
         updateStatus('Starting capture...');
 
-        let captured = 0;
-        while (state.isRunning && captured < pageLimit) {
-            try {
-                await sleep(500);
-                const pageData = await captureCurrentPage();
-                state.capturedPages.push(pageData);
-                captured++;
+        let totalCaptured = 0;
+        let chunkNumber = 0;
+        let consecutiveErrors = 0;
 
-                const label = pageData.pageLabel || `#${captured}`;
-                updateModalUI();
-                updateStatus(`Captured page ${label} (${captured}/${pageLimit})`);
-                updateProgress(captured, pageLimit);
+        while (state.isRunning && totalCaptured < pageLimit) {
+            // Start a fresh PDF for this chunk
+            const { jsPDF } = window.jspdf;
+            const pdf = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'letter' });
+            let chunkPageCount = 0;
+            let chunkFirstLabel = null;
+            let chunkLastLabel = null;
 
-                if (captured >= pageLimit) {
-                    updateStatus(`Done! ${state.capturedPages.length} pages captured.`, 'success');
-                    break;
+            const pagesThisChunk = Math.min(CHUNK_SIZE, pageLimit - totalCaptured);
+
+            while (state.isRunning && chunkPageCount < pagesThisChunk) {
+                try {
+                    await sleep(500);
+
+                    if (consecutiveErrors > 0) {
+                        state.readyFrames = [];
+                        await pingIframe();
+                    }
+
+                    const pageData = await captureCurrentPage();
+                    consecutiveErrors = 0;
+
+                    if (chunkPageCount > 0) pdf.addPage('letter', 'portrait');
+                    const dims = calculateImageDimensions(pageData.width, pageData.height);
+                    pdf.addImage(pageData.data, 'JPEG', dims.offsetX, dims.offsetY, dims.drawWidth, dims.drawHeight);
+
+                    chunkPageCount++;
+                    totalCaptured++;
+
+                    const label = pageData.pageLabel || `#${totalCaptured}`;
+                    if (!chunkFirstLabel) chunkFirstLabel = label;
+                    chunkLastLabel = label;
+
+                    // Track overall state for the UI
+                    state.pageCount = totalCaptured;
+                    if (!state.firstPageLabel) state.firstPageLabel = label;
+                    state.lastPageLabel = label;
+
+                    updateModalUI();
+                    updateStatus(`Captured page ${label} (${totalCaptured}/${pageLimit})`);
+                    updateProgress(totalCaptured, pageLimit);
+
+                    if (totalCaptured >= pageLimit) break;
+
+                    const navResult = await goToNextPage();
+                    if (navResult === 'last-page') {
+                        updateStatus(`Reached last page. ${totalCaptured} pages captured total.`, 'success');
+                        // Save this final chunk below, then exit
+                        state.isRunning = false;
+                        break;
+                    }
+                } catch (e) {
+                    consecutiveErrors++;
+                    console.warn(`[VS-PDF] Error on page ${totalCaptured + 1}:`, e.message);
+
+                    if (consecutiveErrors >= 3) {
+                        updateStatus(`Stopped after ${consecutiveErrors} consecutive errors: ${e.message}. ${totalCaptured} pages captured.`, 'error');
+                        state.isRunning = false;
+                        break;
+                    }
+
+                    updateStatus(`Retrying after error: ${e.message} (attempt ${consecutiveErrors}/3)`, 'info');
+
+                    try {
+                        const navResult = await goToNextPage();
+                        if (navResult === 'last-page') {
+                            state.isRunning = false;
+                            break;
+                        }
+                    } catch {
+                        // Will retry on next loop iteration
+                    }
                 }
-
-                await goToNextPage();
-            } catch (e) {
-                if (e.message === 'Last page') {
-                    updateStatus(`Done! ${state.capturedPages.length} pages captured.`, 'success');
-                    break;
-                }
-                updateStatus(`Error on page ${captured + 1}: ${e.message}`, 'error');
-                try { await goToNextPage(); } catch { break; }
             }
+
+            // Save this chunk if it has any pages
+            if (chunkPageCount > 0) {
+                chunkNumber++;
+                let filename = document.getElementById('vs-filename').value.trim();
+                if (!filename) filename = sanitizeFilename(getBookTitle() || 'vitalsource-book');
+
+                const firstLabel = chunkFirstLabel || '1';
+                const lastLabel = chunkLastLabel || String(chunkPageCount);
+
+                if (pageLimit <= CHUNK_SIZE && chunkNumber === 1) {
+                    // Small enough for one file — no chunk numbering needed
+                    pdf.save(`${filename}_p${firstLabel}-${lastLabel}.pdf`);
+                } else {
+                    pdf.save(`${filename}_part${chunkNumber}_p${firstLabel}-${lastLabel}.pdf`);
+                }
+
+                updateStatus(
+                    `Saved part ${chunkNumber} (pages ${firstLabel}–${lastLabel}). ` +
+                    `${totalCaptured} pages captured total.`,
+                    totalCaptured >= pageLimit || !state.isRunning ? 'success' : 'info'
+                );
+            }
+        }
+
+        if (totalCaptured > 0 && chunkNumber > 1) {
+            updateStatus(`Done! ${totalCaptured} pages saved across ${chunkNumber} files.`, 'success');
         }
 
         state.isRunning = false;
@@ -324,9 +374,9 @@
     function updateModalUI() {
         const actionBtn = document.getElementById('vs-action');
         const clearBtn = document.getElementById('vs-clear');
-        document.getElementById('vs-page-count').textContent = state.capturedPages.length;
+        document.getElementById('vs-page-count').textContent = state.pageCount;
 
-        if (state.capturedPages.length > 0) {
+        if (state.pageCount > 0) {
             clearBtn.style.display = 'block';
             actionBtn.textContent = state.isRunning ? 'Stop' : 'Download PDF';
         } else {
@@ -484,14 +534,17 @@
             if (state.isRunning) {
                 state.isRunning = false;
                 updateModalUI();
-            } else if (state.capturedPages.length > 0) {
+            } else if (state.pageCount > 0) {
                 generatePDF();
             } else {
                 startCapture();
             }
         });
         document.getElementById('vs-clear').addEventListener('click', () => {
-            state.capturedPages = [];
+            state.pdf = null;
+            state.pageCount = 0;
+            state.firstPageLabel = null;
+            state.lastPageLabel = null;
             updateModalUI();
             updateProgress(0, 1);
             updateStatus('Cleared all pages.', 'info');
